@@ -29,6 +29,36 @@ hands_components = Variable(torch.from_numpy(np.expand_dims(np.vstack(dd['hands_
 hands_mean       = Variable(torch.from_numpy(np.expand_dims(dd['hands_mean'], 0).astype(np.float32)).cuda())
 root_rot = Variable(torch.FloatTensor([np.pi,0.,0.]).unsqueeze(0).cuda())
 
+def projection_pano(X, K, R, t, Kd=None):
+    """ Projects points X (3xN) using camera intrinsics K (3x3),
+    extrinsics (R,t) and distortion parameters Kd=[k1,k2,p1,p2,k3].
+    
+    Roughly, x = K*(R*X + t) + distortion
+    
+    See http://docs.opencv.org/2.4/doc/tutorials/calib3d/camera_calibration/camera_calibration.html
+    or cv2.projectPoints
+    """
+    X = X.permute(0,2,1)
+    
+    batch_size = X.shape[0]
+    num_points = X.shape[2]
+    # x [b, 3, num_points]
+    x0 = torch.bmm(R, X) + t.repeat(1, 1, num_points)
+    x1 = x0[:,0:2,:] / x0[:,2:3,:].repeat(1,2,1)
+    
+    if Kd is not None:
+        r = x1[:,0,:]*x1[:,0,:] + x1[:,1,:]*x1[:,1,:]
+        x2 = x1[:,0,:]*(1 + Kd[:,0:1].repeat(1,num_points)*r + Kd[:,1:2].repeat(1,num_points)*r*r + Kd[:,4:5].repeat(1,num_points)*r*r*r) + 2*Kd[:,2:3].repeat(1,num_points)*x1[:,0,:]*x1[:,1,:] + Kd[:,3:4].repeat(1,num_points)*(r + 2*x1[:,0,:]*x1[:,0,:])
+        y2 = x1[:,1,:]*(1 + Kd[:,0:1].repeat(1,num_points)*r + Kd[:,1:2].repeat(1,num_points)*r*r + Kd[:,4:5].repeat(1,num_points)*r*r*r) + 2*Kd[:,3:4].repeat(1,num_points)*x1[:,0,:]*x1[:,1,:] + Kd[:,2:3].repeat(1,num_points)*(r + 2*x1[:,1,:]*x1[:,1,:])
+
+        x3 = K[:,0,0:1].repeat(1,num_points)*x2 + K[:,0,1:2].repeat(1,num_points)*y2 + K[:,0,2:3].repeat(1,num_points)
+        y3 = K[:,1,0:1].repeat(1,num_points)*x2 + K[:,1,1:2].repeat(1,num_points)*y2 + K[:,1,2:3].repeat(1,num_points)
+    else:
+        x3 = K[:,0,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,0,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,0,2:3].repeat(1,num_points)
+        y3 = K[:,1,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,1,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,1,2:3].repeat(1,num_points)
+    
+    return torch.cat((torch.unsqueeze(x3, 2), torch.unsqueeze(y3, 2)), dim=2)
+
 def rodrigues(r):       
     theta = torch.sqrt(torch.sum(torch.pow(r, 2),1))  
 
@@ -334,7 +364,7 @@ class ResNet_Mano(nn.Module):
         return nn.Sequential(*layers)
 
 
-    def forward(self, x):
+    def forward(self, x, base, K, R, t, Kd):
        
         if (self.input_option):       
             x = self.conv11(x)
@@ -353,7 +383,7 @@ class ResNet_Mano(nn.Module):
         x = x.view(x.size(0), -1) 
 
         xs = self.fc(x)
-        xs = xs + self.mean  
+        # xs = xs + self.mean  
 
         scale = xs[:,0]
         trans = xs[:,1:3] 
@@ -362,14 +392,20 @@ class ResNet_Mano(nn.Module):
         beta = xs[:,12:] 
 
         x3d = rot_pose_beta_to_mesh(rot,theta,beta)
-        
-        x = trans.unsqueeze(1) + scale.unsqueeze(1).unsqueeze(2) * x3d[:,:,:2] 
-        x = x.view(x.size(0),-1)      
-              
-        #x3d = scale.unsqueeze(1).unsqueeze(2) * x3d
-        #x3d[:,:,:2]  = trans.unsqueeze(1) + x3d[:,:,:2] 
-        
-        return x, x3d
+
+        x3d_change_seq = torch.zeros_like(x3d)
+        x3d_change_seq[:,0:1,:] = x3d[:,0:1,:]
+        x3d_change_seq[:,1:5,:] = x3d[:,17:21,:]
+        x3d_change_seq[:,5:9,:] = x3d[:,1:5,:]
+        x3d_change_seq[:,9:13,:] = x3d[:,5:9,:]
+        x3d_change_seq[:,13:17,:] = x3d[:,13:17,:]
+        x3d_change_seq[:,17:21,:] = x3d[:,9:13,:]
+        x3d_change_seq[:,21:,:] = x3d[:,21:,:]
+
+        # Use pano camera
+        x3d_new = (x3d_change_seq - x3d_change_seq[:,0:1,:].repeat(1, 799, 1)) * 100 + base.repeat(1, 799, 1)
+        x2d = projection_pano(x3d_new, K, R, t)
+        return x2d, x3d_new, xs
 
 def resnet34_Mano(pretrained=False,input_option=1, **kwargs):
     
