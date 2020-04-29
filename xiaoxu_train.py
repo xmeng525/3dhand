@@ -108,7 +108,7 @@ for epoch in range(epochs):
             j3d = x3d[:, :21,:].reshape((bs, 21,3))
             # --  loss --
             loss_complex = decoder_criterion(
-                j3d[5:,:,:], j3d_gt[5:,:,:], j2d[5:,:,:], j2d_gt[5:,:,:], v2d, embedding[:,6:], masks)
+                j3d, j3d_gt, j2d, j2d_gt, v2d, embedding[:,6:], masks)
 
             # backward + optimize only if in training phase
             if phase == 'train':

@@ -15,8 +15,32 @@ from transform import Scale
 
 from pck_utils import PCK, PCK_3D
 from display_utils import display_hand_3d, plot_hand, plot_hand_3d
+
+def world2cam(X, K, R, t):
+    """ Projects points X (3xN) using camera intrinsics K (3x3),
+    extrinsics (R,t) and distortion parameters Kd=[k1,k2,p1,p2,k3].
+    
+    Roughly, x = K*(R*X + t) + distortion
+    
+    See http://docs.opencv.org/2.4/doc/tutorials/calib3d/camera_calibration/camera_calibration.html
+    or cv2.projectPoints
+    """
+    X = X.permute(0,2,1)
+    
+    batch_size = X.shape[0]
+    num_points = X.shape[2]
+    # x [b, 3, num_points]
+    x0 = torch.bmm(R, X) + t.repeat(1, 1, num_points)
+    x1 = x0[:,0:2,:] / x0[:,2:3,:].repeat(1,2,1)
+
+    x3 = K[:,0,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,0,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,0,2:3].repeat(1,num_points)
+    y3 = K[:,1,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,1,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,1,2:3].repeat(1,num_points)
+
+    return torch.cat((torch.unsqueeze(x3, 2), torch.unsqueeze(y3, 2), torch.unsqueeze(x0[:,2,:], 2)), dim=2)
+
 # 1 use image and joint heat maps as input
 # 0 use image only as input
+if_cam_coord_pck = True
 if_save_results = False
 if_export_images = False
 init_model = False
@@ -36,14 +60,17 @@ pck_3d_util = PCK_3D(image_scale)
 
 faces = np.loadtxt('/home/xiaoxu/Documents/rgb2mesh/BootStrapping/code/bs_hand/utils/faces.txt', dtype='i4', delimiter=',')
 my_transform = Compose([Scale((image_scale, image_scale), Image.BILINEAR), ToTensor()])
-# root_dir = '/mnt/ext_toshiba/rgb2mesh/DataSets/panoptic-toolbox/'
-root_dir = '/home/xiaoxu/Documents/rgb2mesh/BootStrapping/panoptic-toolbox'
+root_dir = '/mnt/ext_toshiba/rgb2mesh/DataSets/panoptic-toolbox/'
+# root_dir = '/home/xiaoxu/Documents/rgb2mesh/BootStrapping/panoptic-toolbox'
 dataset_list = ['171026_pose3']
 
 if if_save_results:
-	os.makedirs(os.path.join(dataset_list[0], 'v3d'), exist_ok=True)   
-	os.makedirs(os.path.join(dataset_list[0], 'j3d'), exist_ok=True)   
-	os.makedirs(os.path.join(dataset_list[0], 'j2d'), exist_ok=True)
+	if not os.path.exists(os.path.join(dataset_list[0], 'v3d')):
+		os.makedirs(os.path.join(dataset_list[0], 'v3d'))
+	if not os.path.exists(os.path.join(dataset_list[0], 'j3d')):
+		os.makedirs(os.path.join(dataset_list[0], 'j3d'))
+	if not os.path.exists(os.path.join(dataset_list[0], 'j2d')): 
+		os.makedirs(os.path.join(dataset_list[0], 'j2d'))
 
 test_dataset = PanopticSet(root_dir, dataset_list=dataset_list, 
 	image_size=image_scale, data_par='test', img_transform=my_transform)
@@ -78,6 +105,7 @@ for i, data in enumerate(testloader, 0):
 	cam_K = np.reshape(labels[:,105:114], (bs, 3,3))
 	cam_R = np.reshape(labels[:,114:123], (bs, 3,3))
 	cam_t = np.reshape(labels[:,123:126], (bs, 3,1))
+
 	cam_distCoef = labels[:,126:131]
 	frame_idx = labels[:,131]
 	camera_idx = labels[:, 132]
@@ -100,7 +128,10 @@ for i, data in enumerate(testloader, 0):
 	j3d = x3d[:, :21,:].reshape((bs, 21,3)).detach().cpu().numpy()
 
 	pck_util.add_sample(j2d_gt, j2d)
-	pck_3d_util.add_sample(j3d_gt, j3d)
+	if if_cam_coord_pck:
+		j3d_gt = world2cam(torch.Tensor(j3d_gt), torch.Tensor(cam_K), torch.Tensor(cam_R), torch.Tensor(cam_t))
+		j3d = world2cam(torch.Tensor(j3d), torch.Tensor(cam_K), torch.Tensor(cam_R), torch.Tensor(cam_t))
+		pck_3d_util.add_sample(j3d_gt, j3d)
 
 	if if_export_images:
 		for idx in range(batch_size):
@@ -114,13 +145,13 @@ for i, data in enumerate(testloader, 0):
 			plot_hand_3d(ax2, j3d_gt[idx,:,:], 'b*', 1.0)
 			plot_hand_3d(ax2, j3d[idx,:,:], 'r.', 0.1)
 			
-			ax3 = plt.subplot(3, batch_size,  * 2 + idx + 1, projection='3d')
-			display_hand_3d(v3d, j3d, mano_faces=faces, ax=ax3, alpha=0.2, 
-				edge_color=(255 / 255, 50 / 255, 50 / 255))
+			# ax3 = plt.subplot(3, batch_size, batch_size * 2 + idx + 1, projection='3d')
+			# display_hand_3d(v3d, j3d, mano_faces=faces, ax=ax3, alpha=0.2, 
+			# 	edge_color=(255 / 255, 50 / 255, 50 / 255))
 		fig.set_size_inches(5 * batch_size, 5 * 3)
 		plt.savefig(os.path.join(dataset_list[0], '%08d.png'%i))
 		plt.close()
-
+		exit()
 	if if_save_results:
 		for idx in range(bs):
 			save_name = '%08d_%02d_%02d_%d'%(frame_idx[idx], camera_idx[idx], people_idx[idx], hand_idx[idx])
