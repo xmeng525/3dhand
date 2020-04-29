@@ -29,6 +29,28 @@ hands_components = Variable(torch.from_numpy(np.expand_dims(np.vstack(dd['hands_
 hands_mean       = Variable(torch.from_numpy(np.expand_dims(dd['hands_mean'], 0).astype(np.float32)).cuda())
 root_rot = Variable(torch.FloatTensor([np.pi,0.,0.]).unsqueeze(0).cuda())
 
+def world2cam(X, K, R, t):
+    """ Projects points X (3xN) using camera intrinsics K (3x3),
+    extrinsics (R,t) and distortion parameters Kd=[k1,k2,p1,p2,k3].
+    
+    Roughly, x = K*(R*X + t) + distortion
+    
+    See http://docs.opencv.org/2.4/doc/tutorials/calib3d/camera_calibration/camera_calibration.html
+    or cv2.projectPoints
+    """
+    X = X.permute(0,2,1)
+    
+    batch_size = X.shape[0]
+    num_points = X.shape[2]
+    # x [b, 3, num_points]
+    x0 = torch.bmm(R, X) + t.repeat(1, 1, num_points)
+    x1 = x0[:,0:2,:] / x0[:,2:3,:].repeat(1,2,1)
+
+    x3 = K[:,0,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,0,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,0,2:3].repeat(1,num_points)
+    y3 = K[:,1,0:1].repeat(1,num_points)*x1[:,0,:] + K[:,1,1:2].repeat(1,num_points)*x1[:,1,:] + K[:,1,2:3].repeat(1,num_points)
+
+    return torch.cat((torch.unsqueeze(x3, 2), torch.unsqueeze(y3, 2), torch.unsqueeze(x0[:,2,:], 2)), dim=2)
+
 def projection_pano(X, K, R, t, Kd=None):
     """ Projects points X (3xN) using camera intrinsics K (3x3),
     extrinsics (R,t) and distortion parameters Kd=[k1,k2,p1,p2,k3].
@@ -383,7 +405,7 @@ class ResNet_Mano(nn.Module):
         x = x.view(x.size(0), -1) 
 
         xs = self.fc(x)
-        # xs = xs + self.mean  
+        xs = xs + self.mean  
 
         scale = xs[:,0]
         trans = xs[:,1:3] 
@@ -402,10 +424,10 @@ class ResNet_Mano(nn.Module):
         x3d_change_seq[:,17:21,:] = x3d[:,9:13,:]
         x3d_change_seq[:,21:,:] = x3d[:,21:,:]
 
-        # Use pano camera
-        x3d_new = (x3d_change_seq - x3d_change_seq[:,0:1,:].repeat(1, 799, 1)) * 100 + base.repeat(1, 799, 1)
-        x2d = projection_pano(x3d_new, K, R, t)
-        return x2d, x3d_new, xs
+        x2d_transformed = trans.unsqueeze(1) + scale.unsqueeze(1).unsqueeze(2) * x3d_change_seq[:,:,:2]
+        x3d_transformed = torch.cat((x2d_transformed, x3d_change_seq[:,:,2:3]), dim=2)
+        x3d_origin = (x3d_transformed - x3d_transformed[:,0:1,:].repeat(1, 799, 1)) + base.repeat(1, 799, 1)
+        return x3d_origin[:,:,0:2], x3d_origin, xs
 
 def resnet34_Mano(pretrained=False,input_option=1, **kwargs):
     

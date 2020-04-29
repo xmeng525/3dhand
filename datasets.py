@@ -58,7 +58,8 @@ class PanopticSet(data.Dataset):
 				self.image_size, self.image_size, 10))
 			imgs = torch.cat((rgb, heatmaps), dim=0)
 			# mask
-			mask = torch.zeros((self.image_size, self.image_size))
+			original_mask = Image.open(os.path.join(data_dir, 'mask', scene_frame_name)).convert('L')
+			mask = torch.squeeze(self.img_transform(original_mask))
 		else:
 			# rgb
 			imgs = [self.img_transform(Image.open(os.path.join(

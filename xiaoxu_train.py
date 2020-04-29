@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 
 from torchvision.transforms import ToTensor, Compose
 
-from model import resnet34_Mano
+from model import resnet34_Mano, world2cam
 from datasets import PanopticSet
 from transform import Scale
 
 from loss_utils import OxfordLoss, save_loss
-from display_utils import display_hand_3d, plot_hand
+from display_utils import display_hand_3d, plot_hand, plot_hand_3d
 
 init_model = False
 # 1 use image and joint heat maps as input
@@ -33,12 +33,12 @@ template.close()
 
 decoder_criterion = OxfordLoss()
 decoder_criterion.a_2d = 10
-decoder_criterion.a_3d = 10
+decoder_criterion.a_3d = 1
 decoder_criterion.a_mask = 100
-decoder_criterion.a_reg = 0.0001
+decoder_criterion.a_reg = 0.01
 
 my_transform = Compose([Scale((image_scale, image_scale), Image.BILINEAR), ToTensor()])
-root_dir = '/home/xiaoxu/Documents/rgb2mesh/BootStrapping/panoptic-toolbox/'
+root_dir = '/mnt/ext_toshiba/rgb2mesh/DataSets/panoptic-toolbox'
 dataset_list = ['171026_pose3']
 
 train_dataset = PanopticSet(root_dir, dataset_list=dataset_list, 
@@ -60,7 +60,7 @@ if init_model:
     model.load_state_dict(torch.load(load_model_path))
     prev_epoch = 0
 else:
-    load_model_path = os.path.join(dataset_list[0], 'best_model_ep29.pth')
+    load_model_path = os.path.join(dataset_list[0], 'best_model_ep10.pth')
     loaded_state = torch.load(load_model_path)
     prev_epoch = loaded_state['epoch']
     print('prev_epoch = ', prev_epoch)
@@ -94,21 +94,23 @@ for epoch in range(epochs):
 
             bs = inputs.shape[0]
 
-            j3d_gt = labels[:,0:63].reshape((bs, 21,3))
+            j3d_gt_world = labels[:,0:63].reshape((bs, 21,3))
             j2d_gt = labels[:,63:105].reshape((bs, 21,2))
             cam_K = labels[:,105:114].reshape((bs, 3,3))
             cam_R = labels[:,114:123].reshape((bs, 3,3))
             cam_t = labels[:,123:126].reshape((bs, 3,1))
             cam_distCoef = labels[:,126:131]
 
-            x2d, x3d, embedding = model(inputs, j3d_gt[:,0:1,:], cam_K, cam_R, cam_t, cam_distCoef)
+            j3d_gt_image = world2cam(j3d_gt_world, cam_K, cam_R, cam_t)
+            x2d, x3d, embedding = model(inputs, j3d_gt_image[:,0:1,:], cam_K, cam_R, cam_t, cam_distCoef)
 
             v2d = x2d[:, 21:,:].reshape((bs, 778,2))
             j2d = x2d[:, :21,:].reshape((bs, 21,2))
             j3d = x3d[:, :21,:].reshape((bs, 21,3))
+
             # --  loss --
             loss_complex = decoder_criterion(
-                j3d, j3d_gt, j2d, j2d_gt, v2d, embedding[:,6:], masks)
+                j3d, j3d_gt_image, j2d, j2d_gt, v2d, embedding[:,6:], masks)
 
             # backward + optimize only if in training phase
             if phase == 'train':
